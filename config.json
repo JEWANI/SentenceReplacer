@@ -1,0 +1,18 @@
+{
+  "theme": {
+    "bg": "#1e1e2e",
+    "tab_btn": "#007AAE",
+    "bottom_btn": "#3F45AA",
+    "inactive_btn": "#808080",
+    "text": "#E0E0E0",
+    "tab_selected": "#00A2E8",
+    "pane": "#005174",
+    "input_bg": "#2b2b3b",
+    "input_text": "#E0E0E0",
+    "list_bg": "#2b2b2b",
+    "list_text": "#E0E0E0",
+    "popup_bg": "#2b2b2b",
+    "popup_text": "#FFFFFF"
+  },
+  "duplicate": "numbering"
+}
