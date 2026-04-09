@@ -3,6 +3,7 @@
 > 파일 내용 교체 · 파일명 일괄 변환 · 편집기 연동을 지원하는 Windows용 문서 관리 유틸리티
 ---
 ![메인화면](./images/SentenceReplace-v80_001.png)
+![메인화면](./images/SentenceReplace-v80_003.png)
 ## 📌 주요 기능
 
 ### 📂 문서 내용 교체
@@ -46,7 +47,7 @@
 | `Ctrl + A` | 목록 전체 선택 |
 | `Delete` | 선택 항목 삭제 |
 
-![실제 기능](./images/SentenceReplace-v80_003.png)
+![실제 기능](./images/SentenceReplace-v80_004.png)
 
 ---
 
