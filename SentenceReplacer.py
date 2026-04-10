@@ -4,15 +4,17 @@ from PyQt6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLineEdit, QPushButton,
     QLabel, QMessageBox, QTabWidget, QListWidget, QAbstractItemView,
     QMainWindow, QStatusBar, QFileDialog, QDialog, QGridLayout,
-    QColorDialog, QTextEdit, QRadioButton, QButtonGroup, QSpinBox, QFrame
+    QColorDialog, QTextEdit, QRadioButton, QButtonGroup, QSpinBox, QFrame,
+    QMenu, QProgressBar
 )
-from PyQt6.QtCore import Qt, QUrl
+from PyQt6.QtCore import Qt, QUrl, QThread, pyqtSignal
 from PyQt6.QtGui import QIcon, QAction, QColor, QFont, QDesktopServices
-from PyQt6.QtWidgets import QMenu
 
-VERSION = "V0.80"
+VERSION = "V0.82"
 
 CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(sys.argv[0])), "config.json")
+
+
 
 DEFAULT_THEME = {
     'bg':          '#1e1e2e',
@@ -36,6 +38,87 @@ DEFAULT_CONFIG = {
     'editor': '',
 }
 
+class FolderScanWorker(QThread):
+    path_found = pyqtSignal(str)
+    finished = pyqtSignal()
+
+    def __init__(self, folder):
+        super().__init__()
+        self.folder = folder
+
+    def run(self):
+        for root, _, files in os.walk(self.folder):
+            for f in files:
+                full_path = os.path.join(root, f)
+                self.path_found.emit(full_path)
+        self.finished.emit()
+
+# ==============================
+# 1. Worker Thread 추가
+# ==============================
+class FileSearchWorker(QThread):
+    progress = pyqtSignal(int)
+    finished = pyqtSignal(list)
+
+    def __init__(self, file_list, keyword):
+        super().__init__()
+        self.file_list = file_list
+        self.keyword = keyword
+
+    def run(self):
+        results = []
+        total = max(len(self.file_list), 1)
+
+        for i, path in enumerate(self.file_list):
+            try:
+                count = 0
+                with open(path, "r", encoding="utf-8", errors="ignore") as f:
+                    for line in f:
+                        count += line.count(self.keyword)
+
+                if count > 0:
+                    results.append((path, count))
+            except Exception as e:
+                print(e)
+
+            percent = int((i + 1) / total * 100)
+            self.progress.emit(percent)
+
+        self.finished.emit(results)
+
+
+# ==============================
+# 2. 로딩 팝업 추가
+# ==============================
+class LoadingDialog(QDialog):
+    def __init__(self, parent, theme):
+        super().__init__(parent)
+        self.setWindowTitle("처리 중")
+        self.setFixedSize(360, 140)
+
+        layout = QVBoxLayout(self)
+
+        self.label = QLabel("파일 목록 불러오는 중...")
+        self.label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        self.progress = QProgressBar()
+        self.progress.setRange(0, 100)
+        self.progress.setValue(0)
+
+        self.percent_label = QLabel("0%")
+        self.percent_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        layout.addWidget(self.label)
+        layout.addWidget(self.progress)
+        layout.addWidget(self.percent_label)
+
+        self.setStyleSheet(dialog_style(theme))
+
+    def set_progress(self, value):
+        self.progress.setValue(value)
+        self.percent_label.setText(f"{value}%")
+
+
 def load_config():
     if os.path.exists(CONFIG_PATH):
         try:
@@ -47,8 +130,10 @@ def load_config():
                 t = dict(DEFAULT_THEME)
                 t.update(data.get('theme', {}))
                 cfg['theme'] = t
-                return cfg
-        except: pass
+                return cfg        
+        except Exception as e:
+            print(e)
+
     return dict(DEFAULT_CONFIG)
 
 def save_config(config):
@@ -82,6 +167,25 @@ def dialog_style(theme):
 def preview_label_style(theme):
     return f"background-color: {theme['input_bg']}; color: {theme['tab_selected']}; border: 1px solid {theme['tab_btn']}; border-radius: 4px; padding: 4px; font-weight: normal;"
 
+def get_list_style(theme):
+    return f"""
+        QListWidget {{
+            background-color: {theme['input_bg']};
+            color: {theme['text']};
+            border: 1px solid {theme['tab_btn']};
+            outline: none;
+        }}
+        QListWidget::item {{
+            height: 20px; 
+            padding: 0px; 
+            margin: 0px;
+        }}
+        QListWidget::item:selected {{
+            background-color: {theme['tab_selected']};
+            color: white;
+        }}
+    """
+
 def get_preview_name(list_w):
     if list_w.count() == 0:
         return None
@@ -103,8 +207,10 @@ def set_elided(lbl, text):
 class FileListWidget(QListWidget):
     def __init__(self):
         super().__init__()
+        self.all_paths = set()  # 중복 체크용 세트 초기화 (에러 방지)
         self.setAcceptDrops(True)
         self.setDragDropMode(QAbstractItemView.DragDropMode.DropOnly)
+        self.setSpacing(0)      # 아이템 간 추가 간격 제거
         self.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.customContextMenuRequested.connect(self._context_menu)
@@ -113,8 +219,18 @@ class FileListWidget(QListWidget):
         return {self.item(i).text() for i in range(self.count())}
 
     def add_path(self, path):
-        if path not in self._existing_paths():
-            self.addItem(path)
+        if not hasattr(self, 'all_paths'): self.all_paths = set()
+        
+        if path not in self.all_paths:
+            from PyQt6.QtWidgets import QListWidgetItem
+            from PyQt6.QtCore import QSize
+
+            # 아이템을 생성하고 높이를 18px로 고정 (기존보다 훨씬 좁아짐)
+            item = QListWidgetItem(path)
+            item.setSizeHint(QSize(0, 18)) 
+            
+            self.addItem(item)
+            self.all_paths.add(path)
 
     def keyPressEvent(self, e):
         if e.key() == Qt.Key.Key_Delete:
@@ -754,7 +870,6 @@ class AboutDialog(QDialog):
         self.setStyleSheet(dialog_style(theme))
 
 
-
 class SearchResultDialog(QDialog):
     """검색 결과 표시 + 파일 열기/경로 복사"""
     def __init__(self, parent, theme, results, editor_path):
@@ -786,17 +901,25 @@ class SearchResultDialog(QDialog):
 
         btn_h = QHBoxLayout()
         btn_open = QPushButton("📂 열기")
+        btn_folder = QPushButton("📁 폴더 이동")
         btn_copy = QPushButton("📋 파일명 복사")
         btn_close = QPushButton("닫기")
-        for b in [btn_open, btn_copy, btn_close]:
+        for b in [btn_open, btn_folder, btn_copy, btn_close]:
             b.setFixedHeight(30)
             btn_h.addWidget(b)
         btn_open.clicked.connect(self._open_selected)
+        btn_folder.clicked.connect(self._open_folder)
         btn_copy.clicked.connect(self._copy_path)
         btn_close.clicked.connect(self.close)
         layout.addLayout(btn_h)
 
         self.setStyleSheet(dialog_style(theme))
+
+    def _open_folder(self):
+        fp = self._selected_path()
+        if not fp: return
+        folder = os.path.dirname(fp)
+        QDesktopServices.openUrl(QUrl.fromLocalFile(folder))
 
     def _selected_path(self):
         row = self.list_w.currentRow()
@@ -819,12 +942,13 @@ class SearchResultDialog(QDialog):
             subprocess.Popen(['notepad.exe', fp])
         else:
             QDesktopServices.openUrl(QUrl.fromLocalFile(fp))
-
+              
     def _copy_path(self):
         fp = self._selected_path()
         if not fp: return
-        QApplication.clipboard().setText(fp)
-        self.parent().set_status(f"📋 복사됨: {os.path.basename(fp)}")
+        filename = os.path.basename(fp)
+        QApplication.clipboard().setText(filename)
+        self.parent().set_status(f"📋 복사됨: {filename}")
 
 
 class EditorDialog(QDialog):
@@ -879,6 +1003,7 @@ class EditorDialog(QDialog):
 
     def confirm(self):
         self.result_confirmed = True; self.accept()
+
 
 class FeaturesDialog(QDialog):
     def __init__(self, parent, theme):
@@ -1091,7 +1216,13 @@ class SProjectManager(QMainWindow):
     def init_tab_content(self, parent, list_w):
         layout = QVBoxLayout(parent); layout.setSpacing(6)
         self.add_control_buttons(layout, list_w)
-        layout.addWidget(QLabel("▣ 대상 파일 목록:")); layout.addWidget(list_w)
+        self.label_file_count1 = QLabel()
+        layout.addWidget(self.label_file_count1)
+        layout.addWidget(list_w)
+
+        self.update_file_count_label(self.label_file_count1, list_w)
+        list_w.model().rowsInserted.connect(lambda: self.update_file_count_label(self.label_file_count1, list_w))
+        list_w.model().rowsRemoved.connect(lambda: self.update_file_count_label(self.label_file_count1, list_w))
         self.old_t = QLineEdit(); self.old_t.setPlaceholderText("찾을 내용")
         self.new_t = QLineEdit(); self.new_t.setPlaceholderText("바꿀 내용")
         layout.addWidget(self.old_t); layout.addWidget(self.new_t)
@@ -1106,10 +1237,20 @@ class SProjectManager(QMainWindow):
         btn_h.addWidget(btn_find); btn_h.addWidget(btn_rep); btn_h.addWidget(btn_undo)
         layout.addLayout(btn_h)
 
+    def update_file_count_label(self, label, list_w):
+        label.setText(f"▣ 대상 파일 목록: {list_w.count()}개")
+
     def init_tab_rename(self, parent, list_w):
         layout = QVBoxLayout(parent); layout.setSpacing(6)
         self.add_control_buttons(layout, list_w)
-        layout.addWidget(QLabel("▣ 파일명 수정 목록:")); layout.addWidget(list_w)
+
+        self.label_file_count2 = QLabel()
+        layout.addWidget(self.label_file_count2)
+        layout.addWidget(list_w)
+
+        self.update_file_count_label(self.label_file_count2, list_w)
+        list_w.model().rowsInserted.connect(lambda: self.update_file_count_label(self.label_file_count2, list_w))
+        list_w.model().rowsRemoved.connect(lambda: self.update_file_count_label(self.label_file_count2, list_w))
         self.rename_old = QLineEdit(); self.rename_old.setPlaceholderText("기존 문자")
         self.rename_new = QLineEdit(); self.rename_new.setPlaceholderText("변경 문자")
         layout.addWidget(self.rename_old); layout.addWidget(self.rename_new)
@@ -1122,20 +1263,27 @@ class SProjectManager(QMainWindow):
         btn_h.addWidget(btn_ren); btn_h.addWidget(btn_undo)
         layout.addLayout(btn_h)
 
-    def add_folder(self, list_w):
+    def add_folder(self, list_w):    
         folder = QFileDialog.getExistingDirectory(self, "폴더 선택")
         if folder:
-            for root, _, files in os.walk(folder):
-                for f in files: list_w.add_path(os.path.join(root, f))
+            self.set_status("📂 파일 목록 불러오는 중...")
+            worker = FolderScanWorker(folder)
+            worker.path_found.connect(list_w.add_path)
+            worker.finished.connect(lambda: self.set_status(f"✅ 불러오기 완료"))
+            worker.start()
+            self._workers = getattr(self, '_workers', [])
+            self._workers.append(worker)
 
     def add_folder_all(self):
         folder = QFileDialog.getExistingDirectory(self, "폴더 선택")
         if folder:
-            for root, _, files in os.walk(folder):
-                for f in files:
-                    path = os.path.join(root, f)
-                    self.list1.add_path(path)
-                    self.list2.add_path(path)
+            self.set_status("📂 파일 목록 불러오는 중...")
+            worker = FolderScanWorker(folder)
+            worker.path_found.connect(lambda p: (self.list1.add_path(p), self.list2.add_path(p)))
+            worker.finished.connect(lambda: self.set_status("✅ 불러오기 완료"))
+            worker.start()
+            self._workers = getattr(self, '_workers', [])
+            self._workers.append(worker)
 
     def check_list_empty(self, list_w):
         if list_w.count() == 0:
@@ -1163,20 +1311,35 @@ class SProjectManager(QMainWindow):
         if self.check_list_empty(list_w): return
         target = self.old_t.text()
         if not target: return
-        results = []
+
+        file_list = []
         for i in range(list_w.count()):
             fp = list_w.item(i).text()
             if os.path.exists(fp):
-                try:
-                    with open(fp, 'r', encoding='utf-8') as f: fc = f.read()
-                    c = fc.count(target)
-                    if c > 0: results.append((fp, c))
-                except: continue
+                file_list.append(fp)
+
+        self.start_search_with_loading(file_list, target)
+
+    def start_search_with_loading(self, file_list, keyword):
+        self.loading_dialog = LoadingDialog(self, self.theme)
+        self.loading_dialog.show()
+
+        self.worker = FileSearchWorker(file_list, keyword)
+
+        self.worker.progress.connect(self.loading_dialog.set_progress)
+        self.worker.finished.connect(self._on_search_finished)
+
+        self.worker.start()
+
+    def _on_search_finished(self, results):
+        self.loading_dialog.close()
+
         if not results:
             QMessageBox.information(self, "검색 결과", "해당 내용을 찾을 수 없습니다.")
-        else:
-            dlg = SearchResultDialog(self, self.theme, results, self.editor_path)
-            dlg.exec()
+            return
+
+        dlg = SearchResultDialog(self, self.theme, results, self.editor_path)
+        dlg.exec()
 
     def run_replace(self, list_w):
         if self.check_list_empty(list_w): return
