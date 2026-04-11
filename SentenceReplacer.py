@@ -10,7 +10,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, QUrl, QThread, pyqtSignal
 from PyQt6.QtGui import QIcon, QAction, QColor, QFont, QDesktopServices
 
-VERSION = "V0.82"
+VERSION = "V0.84"
 
 CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(sys.argv[0])), "config.json")
 
@@ -219,18 +219,26 @@ class FileListWidget(QListWidget):
         return {self.item(i).text() for i in range(self.count())}
 
     def add_path(self, path):
-        if not hasattr(self, 'all_paths'): self.all_paths = set()
-        
-        if path not in self.all_paths:
-            from PyQt6.QtWidgets import QListWidgetItem
-            from PyQt6.QtCore import QSize
+        if not hasattr(self, 'all_paths'):
+            self.all_paths = set()
 
-            # 아이템을 생성하고 높이를 18px로 고정 (기존보다 훨씬 좁아짐)
-            item = QListWidgetItem(path)
-            item.setSizeHint(QSize(0, 18)) 
-            
-            self.addItem(item)
-            self.all_paths.add(path)
+        # 실제 전체 경로로 중복 체크
+        if path in self.all_paths:
+            return
+
+        from PyQt6.QtWidgets import QListWidgetItem
+        from PyQt6.QtCore import QSize, Qt
+
+        parent_dir = os.path.basename(os.path.dirname(path))
+        display_name = os.path.join(parent_dir, os.path.basename(path))
+
+        item = QListWidgetItem(display_name)
+        item.setData(Qt.ItemDataRole.UserRole, path)
+        item.setSizeHint(QSize(0, 18))
+        item.setToolTip(path)
+
+        self.addItem(item)
+        self.all_paths.add(path)
 
     def keyPressEvent(self, e):
         if e.key() == Qt.Key.Key_Delete:
@@ -1308,27 +1316,37 @@ class SProjectManager(QMainWindow):
             return None
 
     def run_find(self, list_w):
-        if self.check_list_empty(list_w): return
-        target = self.old_t.text()
-        if not target: return
+        if self.check_list_empty(list_w): 
+            return
 
+        target = self.old_t.text().strip()
+        if not target:
+            QMessageBox.warning(self, "알림", "찾을 내용을 입력해주세요.")
+            return
+
+        # 실제 전체 경로 리스트 만들기
         file_list = []
         for i in range(list_w.count()):
-            fp = list_w.item(i).text()
-            if os.path.exists(fp):
+            item = list_w.item(i)
+            fp = item.data(Qt.ItemDataRole.UserRole)   # ← 핵심 수정!
+            if fp and os.path.exists(fp):
                 file_list.append(fp)
 
+        if not file_list:
+            QMessageBox.warning(self, "알림", "유효한 파일이 없습니다.")
+            return
+
+        self.set_status("🔍 파일 내용 검색 중...")
         self.start_search_with_loading(file_list, target)
 
     def start_search_with_loading(self, file_list, keyword):
         self.loading_dialog = LoadingDialog(self, self.theme)
+        self.loading_dialog.label.setText("파일 내용 검색 중...")
         self.loading_dialog.show()
 
         self.worker = FileSearchWorker(file_list, keyword)
-
         self.worker.progress.connect(self.loading_dialog.set_progress)
         self.worker.finished.connect(self._on_search_finished)
-
         self.worker.start()
 
     def _on_search_finished(self, results):
@@ -1345,7 +1363,9 @@ class SProjectManager(QMainWindow):
         if self.check_list_empty(list_w): return
         self.undo_stack_content = []; count = 0
         for i in range(list_w.count()):
-            fp = list_w.item(i).text()
+            item = list_w.item(i)
+            # .text() 대신 .data(Qt.ItemDataRole.UserRole) 사용
+            fp = item.data(Qt.ItemDataRole.UserRole) 
             if os.path.exists(fp):
                 try:
                     with open(fp, 'r', encoding='utf-8') as f: content = f.read()
@@ -1359,61 +1379,113 @@ class SProjectManager(QMainWindow):
         self.set_status(f"✏ 내용 교체 완료 — {count}개 파일")
 
     def run_rename(self, list_w):
-        if self.check_list_empty(list_w): return
-        self.undo_stack_rename = []; count = 0
+        if self.check_list_empty(list_w): 
+            return
+
+        self.undo_stack_rename = []
+        count = 0
+        old_text = self.rename_old.text()
+        new_text = self.rename_new.text()
+
+        if not old_text:
+            QMessageBox.warning(self, "알림", "기존 문자를 입력해주세요.")
+            return
+
         for i in range(list_w.count()):
-            fp = list_w.item(i).text()
-            if os.path.exists(fp):
-                dir_n, file_n = os.path.split(fp)
-                if self.rename_old.text() in file_n:
-                    new_fp = os.path.join(dir_n, file_n.replace(self.rename_old.text(), self.rename_new.text()))
-                    result = self.safe_rename(fp, new_fp)
-                    if result:
-                        self.undo_stack_rename.append({'old': result, 'new': fp})
-                        list_w.item(i).setText(result); count += 1
-        QMessageBox.information(self, "교체 완료", f"{count}개의 파일 이름이 수정되었습니다.")
-        self.set_status(f"✏ 이름 교체 완료 — {count}개 파일")
+            item = list_w.item(i)
+            fp = item.data(Qt.ItemDataRole.UserRole)   # 실제 전체 경로
+
+            if not os.path.exists(fp):
+                continue
+
+            dir_n, file_n = os.path.split(fp)
+
+            if old_text in file_n:
+                new_name = file_n.replace(old_text, new_text)
+                new_fp = os.path.join(dir_n, new_name)
+
+                # 실제 파일 이름 변경
+                result = self.safe_rename(fp, new_fp)
+                if result:
+                    # Undo 스택에 저장 (되돌릴 때 필요)
+                    self.undo_stack_rename.append({
+                        'old': result,      # 바뀐 후 경로
+                        'new': fp           # 원래 경로
+                    })
+
+                    # 리스트 위젯 업데이트
+                    item.setText(os.path.basename(result))
+                    item.setData(Qt.ItemDataRole.UserRole, result)
+                    count += 1
+
+        if count == 0:
+            QMessageBox.information(self, "알림", "변경 대상이 없습니다.")
+        else:
+            QMessageBox.information(self, "교체 완료", f"{count}개의 파일 이름이 수정되었습니다.")
+            self.set_status(f"✏ 이름 교체 완료 — {count}개 파일")
 
     def auto_version_convert(self):
         list_w = self.list2
         if self.check_list_empty(list_w): return
-        self.undo_stack_rename = []; count = 0
+        self.undo_stack_rename = []
+        count = 0
+
         for i in range(list_w.count()):
-            fp = list_w.item(i).text()
-            if os.path.exists(fp):
-                dir_n, file_n = os.path.split(fp)
-                new_name = re.sub(r'([vV]\d+)_(\d+)', r'\1.\2', file_n)
-                if new_name != file_n:
-                    new_fp = os.path.join(dir_n, new_name)
-                    result = self.safe_rename(fp, new_fp)
-                    if result:
-                        self.undo_stack_rename.append({'old': result, 'new': fp})
-                        list_w.item(i).setText(result); count += 1
+            item = list_w.item(i)
+            fp = item.data(Qt.ItemDataRole.UserRole)   # ← 핵심 수정!
+            
+            if not os.path.exists(fp):
+                continue
+                
+            dir_n, file_n = os.path.split(fp)
+            new_name = re.sub(r'([vV]\d+)_(\d+)', r'\1.\2', file_n)
+            
+            if new_name != file_n:
+                new_fp = os.path.join(dir_n, new_name)
+                result = self.safe_rename(fp, new_fp)
+                if result:
+                    self.undo_stack_rename.append({'old': result, 'new': fp})
+                    item.setText(os.path.basename(result))      # 표시용 이름 업데이트
+                    item.setData(Qt.ItemDataRole.UserRole, result)  # 실제 경로 업데이트
+                    count += 1
+
         if count > 0:
             QMessageBox.information(self, "변환 완료", f"{count}개의 파일 이름이 수정되었습니다.")
             self.set_status(f"🔢 버전 변환 완료 — {count}개 파일")
-        else: QMessageBox.information(self, "알림", "변환할 버전 패턴(vX_X)이 없습니다.")
+        else:
+            QMessageBox.information(self, "알림", "변환할 버전 패턴(vX_X)이 없습니다.")
 
     def auto_space_convert(self):
         list_w = self.list2
         if self.check_list_empty(list_w): return
-        self.undo_stack_rename = []; count = 0
+        self.undo_stack_rename = []
+        count = 0
+
         for i in range(list_w.count()):
-            fp = list_w.item(i).text()
-            if os.path.exists(fp):
-                dir_n, file_n = os.path.split(fp)
-                name, ext = os.path.splitext(file_n)
-                new_name = name.replace('_', ' ') + ext
-                if new_name != file_n:
-                    new_fp = os.path.join(dir_n, new_name)
-                    result = self.safe_rename(fp, new_fp)
-                    if result:
-                        self.undo_stack_rename.append({'old': result, 'new': fp})
-                        list_w.item(i).setText(result); count += 1
+            item = list_w.item(i)
+            fp = item.data(Qt.ItemDataRole.UserRole)   # ← 핵심 수정!
+            
+            if not os.path.exists(fp):
+                continue
+                
+            dir_n, file_n = os.path.split(fp)
+            name, ext = os.path.splitext(file_n)
+            new_name = name.replace('_', ' ') + ext
+            
+            if new_name != file_n:
+                new_fp = os.path.join(dir_n, new_name)
+                result = self.safe_rename(fp, new_fp)
+                if result:
+                    self.undo_stack_rename.append({'old': result, 'new': fp})
+                    item.setText(os.path.basename(result))      # 표시용 이름 업데이트
+                    item.setData(Qt.ItemDataRole.UserRole, result)  # 실제 경로 업데이트
+                    count += 1
+
         if count > 0:
             QMessageBox.information(self, "변환 완료", f"{count}개의 파일 이름이 수정되었습니다.")
             self.set_status(f"🔤 공백 변환 완료 — {count}개 파일")
-        else: QMessageBox.information(self, "알림", "변환할 언더바(_)가 없습니다.")
+        else:
+            QMessageBox.information(self, "알림", "변환할 언더바(_)가 없습니다.")
 
     def _apply_name_transform(self, transform_fn):
         list_w = self.list2
@@ -1490,20 +1562,52 @@ class SProjectManager(QMainWindow):
     def undo_action(self, list_w, mode):
         if mode == 'content':
             if not self.undo_stack_content:
-                QMessageBox.warning(self, "알림", "되돌릴 작업이 없습니다."); return
+                QMessageBox.warning(self, "알림", "되돌릴 작업이 없습니다.")
+                return
             for item in self.undo_stack_content:
-                with open(item['path'], 'w', encoding='utf-8') as f: f.write(item['content'])
+                try:
+                    with open(item['path'], 'w', encoding='utf-8') as f:
+                        f.write(item['content'])
+                except:
+                    pass
             self.undo_stack_content = []
-        else:
+            QMessageBox.information(self, "복구 완료", "문서 내용이 이전 상태로 복구되었습니다.")
+
+        else:  # === 파일 이름 되돌리기 ===
             if not self.undo_stack_rename:
-                QMessageBox.warning(self, "알림", "되돌릴 작업이 없습니다."); return
-            for item in self.undo_stack_rename:
-                os.rename(item['old'], item['new'])
-                for i in range(list_w.count()):
-                    if list_w.item(i).text() == item['old']: list_w.item(i).setText(item['new'])
+                QMessageBox.warning(self, "알림", "되돌릴 작업이 없습니다.")
+                return
+
+            restored = 0
+            for entry in reversed(self.undo_stack_rename):   # 역순으로 복구
+                old_path = entry['old']   # 현재 파일 경로 (바뀐 이름)
+                original_path = entry['new']  # 원래 파일 경로
+
+                if os.path.exists(old_path):
+                    try:
+                        os.rename(old_path, original_path)
+
+                        # 리스트에서 해당 아이템 찾아 완전 복구
+                        for i in range(list_w.count()):
+                            item = list_w.item(i)
+                            if item.data(Qt.ItemDataRole.UserRole) == old_path:
+                                item.setText(os.path.basename(original_path))
+                                item.setData(Qt.ItemDataRole.UserRole, original_path)
+                                restored += 1
+                                break
+                    except Exception as e:
+                        print(f"Undo error: {e}")
+
             self.undo_stack_rename = []
-        QMessageBox.information(self, "복구 완료", "이전 상태로 복구되었습니다.")
-        self.set_status("↩ 되돌리기 완료")
+            QMessageBox.information(self, "복구 완료", 
+                                  f"{restored}개의 파일 이름이 이전 상태로 복구되었습니다.")
+            self.set_status(f"↩ 되돌리기 완료 — {restored}개 파일")
+
+        # 파일 개수 라벨 업데이트
+        if mode == 'rename':
+            self.update_file_count_label(self.label_file_count2, list_w)
+        else:
+            self.update_file_count_label(self.label_file_count1, list_w)
 
     def open_theme_dialog(self):   ThemeDialog(self, self.theme).exec()
     def open_about_dialog(self):   AboutDialog(self, self.theme).exec()
